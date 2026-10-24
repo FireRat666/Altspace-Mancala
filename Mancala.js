@@ -41,28 +41,102 @@
         return defaultVal;
     };
 
-    // Parse URL params from this script tag immediately
+    // Parse URL params or script attributes from this script tag immediately
     const currentScript = document.currentScript;
     const scriptSrc = currentScript ? currentScript.src : null;
 
     if (currentScript) {
-        const url = new URL(currentScript.src);
-        const params = new URLSearchParams(url.search);
+        const getParam = (name, defaultValue) => {
+            if (!currentScript) return defaultValue;
+            
+            const getFromURL = (key) => {
+                try {
+                    const base = typeof window !== 'undefined' ? window.location.href : 'http://localhost';
+                    const url = new URL(currentScript.src, base);
+                    const params = new URLSearchParams(url.search);
+                    if (params.has(key)) return params.get(key);
+                    const lowerKey = key.toLowerCase();
+                    for (const [pKey, pVal] of params.entries()) {
+                        if (pKey.toLowerCase() === lowerKey) {
+                            return pVal;
+                        }
+                    }
+                } catch (e) {}
+                return null;
+            };
 
-        if (params.has('hideUI')) config.hideUI = params.get('hideUI') === 'true';
-        if (params.has('hideBoard')) config.hideBoard = params.get('hideBoard') === 'true';
-        if (params.has('instance')) config.instance = params.get('instance');
-        if (params.has('useCustomModels')) config.useCustomModels = params.get('useCustomModels') === 'true';
-        if (params.has('lighting')) config.lighting = params.get('lighting');
-        if (params.has('addLights')) config.addLights = params.get('addLights') !== 'false';
+            const getFromScriptTag = (key) => {
+                try {
+                    if (currentScript.hasAttribute(key)) {
+                        return currentScript.getAttribute(key);
+                    }
+                    const lowerKey = key.toLowerCase();
+                    if (currentScript.hasAttribute(lowerKey)) {
+                        return currentScript.getAttribute(lowerKey);
+                    }
+                    const datasetKey = key.replace(/-([a-z])/g, (g) => g[1].toUpperCase());
+                    if (currentScript.dataset && currentScript.dataset[datasetKey] !== undefined) {
+                        return currentScript.dataset[datasetKey];
+                    }
+                } catch (e) {}
+                return null;
+            };
 
-        config.boardScale = parseVector3(params.get('boardScale'), config.boardScale);
-        config.boardPosition = parseVector3(params.get('boardPosition'), config.boardPosition);
-        config.boardRotation = parseVector3(params.get('boardRotation'), config.boardRotation);
+            const keys = [name];
+            const aliases = {
+                boardPosition: ['position', 'board-position'],
+                boardRotation: ['rotation', 'board-rotation'],
+                boardScale: ['scale', 'board-scale'],
+                hideUI: ['hide-ui'],
+                hideBoard: ['hide-board'],
+                useCustomModels: ['use-custom-models'],
+                addLights: ['add-lights'],
+                useAOBaking: ['use-ao-baking'],
+                boardSize: ['board-size'],
+                piecesOpacity: ['pieces-opacity'],
+                scoreboardPosition: ['scoreboard-position'],
+                scoreboardRotation: ['scoreboard-rotation'],
+                scoreboardScale: ['scoreboard-scale'],
+                resetPosition: ['reset-position'],
+                resetRotation: ['reset-rotation'],
+                resetScale: ['reset-scale'],
+                passPosition: ['pass-position'],
+                passRotation: ['pass-rotation'],
+                passScale: ['pass-scale']
+            };
 
-        config.resetPosition = parseVector3(params.get('resetPosition'), config.resetPosition);
-        config.resetRotation = parseVector3(params.get('resetRotation'), config.resetRotation);
-        config.resetScale = parseVector3(params.get('resetScale'), config.resetScale);
+            if (aliases[name]) {
+                aliases[name].forEach(alias => {
+                    if (!keys.includes(alias)) keys.push(alias);
+                });
+            }
+
+            for (const key of keys) {
+                const val = getFromURL(key);
+                if (val !== null) return val;
+            }
+            for (const key of keys) {
+                const val = getFromScriptTag(key);
+                if (val !== null) return val;
+            }
+
+            return defaultValue;
+        };
+
+        config.hideUI = getParam('hideUI', String(config.hideUI)) === 'true';
+        config.hideBoard = getParam('hideBoard', String(config.hideBoard)) === 'true';
+        config.instance = getParam('instance', config.instance);
+        config.useCustomModels = getParam('useCustomModels', String(config.useCustomModels)) === 'true';
+        config.lighting = getParam('lighting', config.lighting);
+        config.addLights = getParam('addLights', String(config.addLights)) !== 'false';
+
+        config.boardScale = parseVector3(getParam('boardScale'), config.boardScale);
+        config.boardPosition = parseVector3(getParam('boardPosition'), config.boardPosition);
+        config.boardRotation = parseVector3(getParam('boardRotation'), config.boardRotation);
+
+        config.resetPosition = parseVector3(getParam('resetPosition'), config.resetPosition);
+        config.resetRotation = parseVector3(getParam('resetRotation'), config.resetRotation);
+        config.resetScale = parseVector3(getParam('resetScale'), config.resetScale);
     }
 
     // Model URLs for custom pieces
@@ -235,6 +309,9 @@
         inactive: '#888888'    // Grey for opponent's pits
     };
 
+    // The SideQuest Creator SDK renamed ComponentType.BanterMaterial to Material.
+    const materialType = () => BS.ComponentType.Material ?? BS.ComponentType.BanterMaterial;
+
     function hexToVector4(hex, alpha = 1.0) {
         let c = hex.substring(1);
         if (c.length === 3) c = c.split('').map(x => x + x).join('');
@@ -248,7 +325,6 @@
         stonesRoot: null,
         pitObjects: [],    // Array of pit GameObjects (indices 0-13)
         stoneObjects: [],  // Array of arrays - stones per pit
-        isSyncing: false,
         game: new MancalaGame()
     };
 
@@ -452,11 +528,6 @@
     }
 
     function handlePitClick(pitIndex) {
-        if (state.isSyncing) {
-            console.log("Mancala: Input locked (syncing)");
-            return;
-        }
-
         if (state.game.gameOver) {
             console.log("Mancala: Game is over");
             return;
@@ -474,12 +545,9 @@
         }
 
         console.log(`Mancala: Player ${state.game.currentPlayer} clicked pit ${pitIndex}`);
-        state.isSyncing = true;
 
         if (state.game.makeMove(pitIndex)) {
             syncState();
-        } else {
-            state.isSyncing = false;
         }
     }
 
@@ -490,7 +558,29 @@
         syncVisuals();
     }
 
-    async function syncVisuals() {
+    // Redraws can be requested while one is still running (our own move, then the server's
+    // echo of it). Run one at a time, and redraw once more if asked mid-run, or two redraws
+    // add stones to the same pit at once and the counts drift.
+    let redrawing = null;
+    let redrawAgain = false;
+    function syncVisuals() {
+        redrawAgain = true;
+        if (!redrawing) {
+            redrawing = (async () => {
+                try {
+                    while (redrawAgain) {
+                        redrawAgain = false;
+                        await renderVisuals();
+                    }
+                } finally {
+                    redrawing = null;
+                }
+            })();
+        }
+        return redrawing;
+    }
+
+    async function renderVisuals() {
         const game = state.game;
 
         // Update stones in each pit
@@ -502,7 +592,7 @@
             if (i !== 6 && i !== 13) {
                 const pitObj = state.pitObjects[i];
                 if (pitObj) {
-                    const mat = pitObj.GetComponent(BS.ComponentType.BanterMaterial);
+                    const mat = pitObj.GetComponent(materialType());
                     if (mat) {
                         const isOwnPit = game.isOwnPit(game.currentPlayer, i);
                         const hasStones = game.pits[i] > 0;
@@ -521,8 +611,6 @@
                 }
             }
         }
-
-        state.isSyncing = false;
     }
 
     async function updatePitStones(pitIndex, targetCount) {
@@ -635,7 +723,6 @@
             const changes = e.detail.changes;
             if (changes && changes.find(c => c.property === key)) {
                 console.log("Mancala: Received state change from server");
-                state.isSyncing = true;
 
                 const s = BS.BanterScene.GetInstance().spaceState;
                 const val = (s.public && s.public[key]) || (s.protected && s.protected[key]);
@@ -647,10 +734,7 @@
                         syncVisuals();
                     } catch (e) {
                         console.error(e);
-                        state.isSyncing = false;
                     }
-                } else {
-                    state.isSyncing = false;
                 }
             }
         });
