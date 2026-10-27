@@ -582,19 +582,14 @@
         await labels.AddComponent(new BS.Transform());
 
         // Facing player 1 (on +z) or player 2 (on -z)
-        const upright = [new BS.Vector3(0, 180, 0), new BS.Vector3(0, 0, 0)];
         const flat = [new BS.Vector3(90, 180, 0), new BS.Vector3(90, 0, 0)];
         const edgeZ = LAYOUT.rowSpacing / 2 + LAYOUT.pitRadius + 0.07;
 
         for (let i = 0; i < 14; i++) {
             const c = pitCenter(i);
             if (i === 6 || i === 13) {
-                // Stores: count floats above, readable from both sides
-                state.countTexts[i] = [];
-                for (let side = 0; side < 2; side++) {
-                    state.countTexts[i].push(await makeText(labels, "0",
-                        new BS.Vector3(c.x, 0.3, 0), upright[side], 1.2, 3, 1.5));
-                }
+                // Stores: count on a small sign above, readable from both sides
+                state.countTexts[i] = await makeTwoSidedSign(labels, new BS.Vector3(c.x, 0.32, 0), 0.3, 0.2, 1.2);
             } else {
                 // Pits: count lies on the board at the owner's edge, readable by the owner
                 const owner = i < 6 ? 0 : 1;
@@ -604,10 +599,23 @@
             }
         }
 
-        for (let side = 0; side < 2; side++) {
-            state.statusTexts.push(await makeText(labels, "",
-                new BS.Vector3(0, 0.45, 0), upright[side], 1.4, 30, 2));
-        }
+        state.statusTexts = await makeTwoSidedSign(labels, new BS.Vector3(0, 0.62, 0), 1.9, 0.26, 1.2);
+    }
+
+    // A thin wooden sign with text on both faces. The sign sits between the two texts so each
+    // side only sees its own (otherwise the back text shows through, mirrored).
+    // Returns [text facing player 1 (+z), text facing player 2 (-z)].
+    async function makeTwoSidedSign(parent, pos, w, h, fontSize) {
+        const sign = await new BS.GameObject("Sign").Async();
+        await sign.SetParent(parent, false);
+        const t = await sign.AddComponent(new BS.Transform());
+        t.localPosition = pos;
+        await sign.AddComponent(new BS.BanterGeometry(BS.GeometryType.BoxGeometry, null, w, h, 0.01));
+        await sign.AddComponent(new BS.BanterMaterial(shaderFor(false), "", hexToVector4(COLORS.trim), BS.MaterialSide.Front, false));
+        return [
+            await makeText(sign, "", new BS.Vector3(0, 0, 0.007), new BS.Vector3(0, 180, 0), fontSize, w * 10, h * 10),
+            await makeText(sign, "", new BS.Vector3(0, 0, -0.007), new BS.Vector3(0, 0, 0), fontSize, w * 10, h * 10)
+        ];
     }
 
     function statusFor(side) {
