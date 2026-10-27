@@ -137,7 +137,26 @@
        Mancala embed
        Customize via URL params in the src attribute!
     -->
-    <script src="Mancala.js?boardPosition=0+0.7+-2&boardScale=0.7"></script>
+    <!-- snippet section -->
+    <bs-snippet name="mancala" title="Mancala"
+      description="Synced multiplayer Mancala board with a reset button."
+      script="https://mancala.firer.at/snippet.js"
+      room=""
+      position="0 1 2"
+      rotation="0 0 0"
+      scale="0.5"
+      lit="true"
+      add-lights="false"
+      turn-cooldown="5"
+      hide-ui="false"
+      hide-board="false"
+      reset-position="0 0 1.5"
+      reset-rotation="0 0 0"
+      reset-scale="1">
+      <bs-gizmo type="position" attribute="position"/>
+      <bs-gizmo type="box" attribute="position" size="2.15 0.1 0.68"/>
+    </bs-snippet>
+    <!-- end snippet section -->
 </body>
 
 </html>
