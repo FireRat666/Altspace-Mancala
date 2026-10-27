@@ -21,10 +21,11 @@
         resetScale: [1, 1, 1],
         instance: window.location.href.split('?')[0],
         hideUI: false,
+        turnCooldown: 5, // Seconds before the same person can move for the other side; 0 = off
         hideBoard: false,
         useCustomModels: false,
-        lighting: 'unlit',
-        addLights: true
+        lighting: 'lit',
+        addLights: false
     };
 
     // Helper to parse Vector3 from string
@@ -88,6 +89,7 @@
                 boardRotation: ['rotation', 'board-rotation'],
                 boardScale: ['scale', 'board-scale'],
                 hideUI: ['hide-ui'],
+                turnCooldown: ['turn-cooldown'],
                 hideBoard: ['hide-board'],
                 useCustomModels: ['use-custom-models'],
                 addLights: ['add-lights'],
@@ -124,10 +126,15 @@
         };
 
         config.hideUI = getParam('hideUI', String(config.hideUI)) === 'true';
+        config.turnCooldown = parseFloat(getParam('turnCooldown', String(config.turnCooldown)));
+        if (isNaN(config.turnCooldown)) config.turnCooldown = 5;
         config.hideBoard = getParam('hideBoard', String(config.hideBoard)) === 'true';
         config.instance = getParam('instance', config.instance);
         config.useCustomModels = getParam('useCustomModels', String(config.useCustomModels)) === 'true';
         config.lighting = getParam('lighting', config.lighting);
+        // 'lit' is a true/false switch (a checkbox in the snippet editor); it overrides 'lighting'.
+        const litParam = getParam('lit', null);
+        if (litParam !== null) config.lighting = litParam === 'true' ? 'lit' : 'unlit';
         config.addLights = getParam('addLights', String(config.addLights)) !== 'false';
 
         config.boardScale = parseVector3(getParam('boardScale'), config.boardScale);
@@ -300,14 +307,17 @@
 
     // --- Banter Visuals ---
     const COLORS = {
-        board: '#8B4513',      // Saddle brown (wood)
-        pit: '#654321',        // Dark brown
-        store: '#4A3520',      // Darker brown for stores
-        stoneP1: '#E8DCC4',    // Light beige stones
-        stoneP2: '#2F2F2F',    // Dark grey stones  
-        highlight: '#76F250',  // Green highlight for valid moves
-        inactive: '#888888'    // Grey for opponent's pits
+        board: '#9A6234',      // Warm wood top
+        trim: '#5A3418',       // Darker wood edge
+        pit: '#3A2414',        // Dark hollow
+        store: '#33200F',      // Store tray
+        rim: '#7A4A24',        // Ring around each pit
+        highlight: '#4F7A32',  // Pits the current player can pick
+        text: '#F5E6C8'
     };
+
+    // Glass-gem colours, as on real Mancala sets. Stones move between pits, so colour is just decoration.
+    const STONE_COLORS = ['#3FA7D6', '#59CD90', '#F79D84', '#FAC05E', '#EE6352', '#B07BE0', '#5BC0BE'];
 
     // The SideQuest Creator SDK renamed ComponentType.BanterMaterial to Material.
     const materialType = () => BS.ComponentType.Material ?? BS.ComponentType.BanterMaterial;
@@ -325,19 +335,95 @@
         stonesRoot: null,
         pitObjects: [],    // Array of pit GameObjects (indices 0-13)
         stoneObjects: [],  // Array of arrays - stones per pit
+        stoneSpots: [],    // Per pit: where each stone rests
+        countTexts: [],    // Per pit: BanterText components showing the stone count
+        statusTexts: [],   // [facing player 1's side, facing player 2's side]
         game: new MancalaGame()
     };
 
-    // Layout constants
+    // Layout constants (board space, before boardScale). The board top is at y = 0.
+    // Player 1's row is on the +z side (where the reset button is), player 2's on the -z side.
     const LAYOUT = {
-        pitRadius: 0.2,
-        pitDepth: 0.15,
-        storeRadius: 0.25,
-        storeDepth: 0.2,
+        pitRadius: 0.21,
         pitSpacing: 0.5,
         rowSpacing: 0.6,
-        stoneRadius: 0.05
+        storeHalfX: 0.22,
+        storeHalfZ: 0.5,
+        storeX: 1.8,
+        floorY: 0.012,      // Top of the pit/store floor discs
+        stoneRadius: 0.042
     };
+    const BOARD_HALF_X = LAYOUT.storeX + LAYOUT.storeHalfX + 0.09;
+    const BOARD_HALF_Z = LAYOUT.rowSpacing / 2 + LAYOUT.pitRadius + 0.13;
+
+    function shaderFor(transparent) {
+        if (transparent) return "Unlit/DiffuseTransparent";
+        return config.lighting === 'lit' ? "Standard" : "Unlit/Diffuse";
+    }
+
+    function pitCenter(index) {
+        if (index === 6) return { x: LAYOUT.storeX, z: 0 };
+        if (index === 13) return { x: -LAYOUT.storeX, z: 0 };
+        if (index < 6) return { x: (index - 2.5) * LAYOUT.pitSpacing, z: LAYOUT.rowSpacing / 2 };
+        return { x: (2.5 - (index - 7)) * LAYOUT.pitSpacing, z: -LAYOUT.rowSpacing / 2 };
+    }
+
+    // Resting spots for stones in a pit (circle) or store (oval), in fill order. Each layer is
+    // hex-packed and the next one sits in the gaps of the one below, a little smaller each
+    // time, so stones always rest on something and piles look like heaps.
+    function buildStoneSpots(halfX, halfZ, count) {
+        const r = LAYOUT.stoneRadius;
+        const d = r * 2.05;
+        const rowH = d * 0.866;
+        const layerH = d * 0.8165;
+        const layerSpotsFor = (layer, shrink) => {
+            const y = LAYOUT.floorY + r + layer * layerH;
+            const ax = halfX - r - 0.01 - shrink;
+            const az = halfZ - r - 0.01 - shrink;
+            const ox = (layer % 2) ? d / 2 : 0;
+            const oz = (layer % 2) ? rowH / 3 : 0;
+            const out = [];
+            if (ax <= 0 || az <= 0) return out;
+            const n = Math.ceil(Math.max(ax, az) / rowH) + 2;
+            for (let j = -n; j <= n; j++) {
+                for (let i = -n; i <= n; i++) {
+                    const x = i * d + ((j & 1) ? d / 2 : 0) + ox;
+                    const z = j * rowH + oz;
+                    if ((x * x) / (ax * ax) + (z * z) / (az * az) <= 1) out.push({ x, y, z });
+                }
+            }
+            // Fill from the middle outwards
+            out.sort((a, b) => (a.x * a.x + a.z * a.z) - (b.x * b.x + b.z * b.z));
+            return out;
+        };
+        const spots = [];
+        let shrink = 0;
+        for (let layer = 0; spots.length < count; layer++) {
+            // Each layer is a bit narrower, but never fewer than 3 stones, so tall piles
+            // stay a stable heap instead of a single column
+            let s = layer === 0 ? 0 : shrink + d * 0.3;
+            let layerSpots = layerSpotsFor(layer, s);
+            while (layerSpots.length < 3 && s > 0) {
+                s = Math.max(0, s - d * 0.1);
+                layerSpots = layerSpotsFor(layer, s);
+            }
+            shrink = s;
+            spots.push(...layerSpots);
+        }
+        return spots;
+    }
+
+    async function makeText(parent, text, pos, rot, fontSize, w, h) {
+        const obj = await new BS.GameObject("Text").Async();
+        await obj.SetParent(parent, false);
+        const t = await obj.AddComponent(new BS.Transform());
+        t.localPosition = pos;
+        t.localEulerAngles = rot;
+        return obj.AddComponent(new BS.BanterText(
+            text, hexToVector4(COLORS.text), BS.HorizontalAlignment.Center, BS.VerticalAlignment.Center,
+            fontSize, false, false, new BS.Vector2(w, h)
+        ));
+    }
 
     async function setupScene() {
         console.log("Mancala: Setup Scene Started");
@@ -376,10 +462,11 @@
         // Create all pits and stores
         await createPitsAndStores();
 
-        // Create reset button
         if (!config.hideUI) {
-            await createResetButton();
+            await createLabels();
         }
+        // With hideUI the reset button is invisible but still clickable, with its label showing (as in Go)
+        await createResetButton();
 
         // Setup sync listeners
         setupListeners();
@@ -393,54 +480,43 @@
         console.log("Mancala: Setup Scene Complete");
     }
 
+    async function addBox(name, pos, w, h, d, colorHex) {
+        const obj = await new BS.GameObject(name).Async();
+        await obj.SetParent(state.boardRoot, false);
+        const t = await obj.AddComponent(new BS.Transform());
+        t.localPosition = pos;
+        await obj.AddComponent(new BS.BanterGeometry(BS.GeometryType.BoxGeometry, null, w, h, d));
+        await obj.AddComponent(new BS.BanterMaterial(shaderFor(false), "", hexToVector4(colorHex), BS.MaterialSide.Front, false));
+        return obj;
+    }
+
     async function createBoardBase() {
-        const boardWidth = LAYOUT.pitSpacing * 7 + LAYOUT.storeRadius * 2;
-        const boardDepth = LAYOUT.rowSpacing + LAYOUT.pitRadius * 2 + 0.2;
-
-        const base = await new BS.GameObject("BoardBase").Async();
-        await base.SetParent(state.boardRoot, false);
-        let bt = await base.AddComponent(new BS.Transform());
-        bt.localPosition = new BS.Vector3(0, -0.05, 0);
-
-        const shader = config.lighting === 'lit' ? "Standard" : "Unlit/Diffuse";
-        const color = hexToVector4(COLORS.board, config.hideBoard ? 0 : 1);
-
-        await base.AddComponent(new BS.BanterGeometry(
-            BS.GeometryType.BoxGeometry, null,
-            boardWidth, 0.1, boardDepth
-        ));
-        await base.AddComponent(new BS.BanterMaterial(
-            config.hideBoard ? "Unlit/DiffuseTransparent" : shader,
-            "", color, BS.MaterialSide.Front, false
-        ));
+        const w = BOARD_HALF_X * 2;
+        const d = BOARD_HALF_Z * 2;
+        // Dark trim slab, with a lighter top set slightly inside it
+        await addBox("BoardTrim", new BS.Vector3(0, -0.06, 0), w + 0.08, 0.1, d + 0.08, COLORS.trim);
+        await addBox("BoardTop", new BS.Vector3(0, -0.015, 0), w, 0.03, d, COLORS.board);
     }
 
     async function createPitsAndStores() {
-        // Player 1's pits (bottom row, left to right): indices 0-5
-        for (let i = 0; i < 6; i++) {
-            const x = (i - 2.5) * LAYOUT.pitSpacing;
-            const z = LAYOUT.rowSpacing / 2;
-            const pit = await createPit(i, new BS.Vector3(x, 0, z), false);
-            state.pitObjects[i] = pit;
+        for (let i = 0; i < 14; i++) {
+            const isStore = i === 6 || i === 13;
+            const c = pitCenter(i);
+            state.pitObjects[i] = await createPit(i, new BS.Vector3(c.x, 0, c.z), isStore);
+            state.stoneSpots[i] = isStore
+                ? buildStoneSpots(LAYOUT.storeHalfX, LAYOUT.storeHalfZ, 48)
+                : buildStoneSpots(LAYOUT.pitRadius, LAYOUT.pitRadius, 48);
         }
+    }
 
-        // Player 1's store (right side): index 6
-        const store1 = await createPit(6, new BS.Vector3(3 * LAYOUT.pitSpacing, 0, 0), true);
-        state.pitObjects[6] = store1;
-
-        // Player 2's pits (top row, left to right visually = indices 12 down to 7)
-        // Index 7 is rightmost from P2's view, which is left from the shared view
-        for (let i = 0; i < 6; i++) {
-            const pitIndex = 7 + i;
-            const x = (2.5 - i) * LAYOUT.pitSpacing; // Reverse order for top row
-            const z = -LAYOUT.rowSpacing / 2;
-            const pit = await createPit(pitIndex, new BS.Vector3(x, 0, z), false);
-            state.pitObjects[pitIndex] = pit;
-        }
-
-        // Player 2's store (left side): index 13
-        const store2 = await createPit(13, new BS.Vector3(-3 * LAYOUT.pitSpacing, 0, 0), true);
-        state.pitObjects[13] = store2;
+    // A flat disc; for stores it is stretched along z into an oval.
+    function discGeometry(radius, height) {
+        return new BS.BanterGeometry(
+            BS.GeometryType.CylinderGeometry, null,
+            1, height, 1, 1, 1, 1,
+            radius, 32, 0, 6.283185, 0, 6.283185, 8, false,
+            radius, radius
+        );
     }
 
     async function createPit(index, position, isStore) {
@@ -450,44 +526,43 @@
         let pt = await pit.AddComponent(new BS.Transform());
         pt.localPosition = position;
 
-        const radius = isStore ? LAYOUT.storeRadius : LAYOUT.pitRadius;
-        const depth = isStore ? LAYOUT.storeDepth : LAYOUT.pitDepth;
-        const colorHex = isStore ? COLORS.store : COLORS.pit;
-
-        const shader = config.lighting === 'lit' ? "Standard" : "Unlit/Diffuse";
-        let color = hexToVector4(colorHex);
-
-        if (config.hideBoard) {
-            color.w = 0.3;
-        }
+        const radius = isStore ? LAYOUT.storeHalfX : LAYOUT.pitRadius;
+        const stretchZ = isStore ? LAYOUT.storeHalfZ / LAYOUT.storeHalfX : 1;
+        const color = hexToVector4(isStore ? COLORS.store : COLORS.pit, config.hideBoard ? 0.3 : 1);
 
         if (config.useCustomModels) {
-            const modelName = isStore ? PIECE_MODELS.store : PIECE_MODELS.pit;
-            const url = getModelUrl(modelName);
+            const url = getModelUrl(isStore ? PIECE_MODELS.store : PIECE_MODELS.pit);
             await pit.AddComponent(new BS.BanterGLTF(url, false, false, false, false, false, false));
-            pt.localScale = new BS.Vector3(radius * 2, depth, radius * 2);
+            pt.localScale = new BS.Vector3(radius * 2, 0.15, radius * 2 * stretchZ);
         } else {
-            // Create cylinder for pit
-            await pit.AddComponent(new BS.BanterGeometry(
-                BS.GeometryType.CylinderGeometry, null,
-                1, depth, 1, 1, 1, 1,
-                radius, 24, 0, 6.283185, 0, 6.283185, 8, false,
-                radius, radius
-            ));
+            // Lighter rim, then the dark floor of the hollow on top of it
+            if (!config.hideBoard) {
+                const rim = await new BS.GameObject(`PitRim_${index}`).Async();
+                await rim.SetParent(pit, false);
+                const rt = await rim.AddComponent(new BS.Transform());
+                // Sits just under the floor disc. Its parent is already stretched along z, so
+                // undo that here to keep the rim the same width all round.
+                rt.localPosition = new BS.Vector3(0, -0.003, 0);
+                rt.localScale = new BS.Vector3(1, 1, (radius * stretchZ + 0.025) / ((radius + 0.025) * stretchZ));
+                await rim.AddComponent(discGeometry(radius + 0.025, 0.006));
+                await rim.AddComponent(new BS.BanterMaterial(shaderFor(false), "", hexToVector4(COLORS.rim), BS.MaterialSide.Front, false));
+            }
+            pt.localScale = new BS.Vector3(1, 1, stretchZ);
+            pt.localPosition = new BS.Vector3(position.x, LAYOUT.floorY / 2, position.z);
+            await pit.AddComponent(discGeometry(radius, LAYOUT.floorY));
         }
 
         // Pit/store needs unique material for dynamic highlighting
         await pit.AddComponent(new BS.BanterMaterial(
-            config.hideBoard ? "Unlit/DiffuseTransparent" : shader,
-            "", color, BS.MaterialSide.Front, false, `pit_${index}`
+            shaderFor(config.hideBoard), "", color, BS.MaterialSide.Front, false, `pit_${index}`
         ));
 
-        // Add collider for clicks (only on playable pits, not stores)
+        // Clickable pits: the box covers the whole heap of stones too
         if (!isStore) {
             await pit.AddComponent(new BS.BoxCollider(
                 true,
-                new BS.Vector3(0, 0, 0),
-                new BS.Vector3(radius * 2, depth + 0.1, radius * 2)
+                new BS.Vector3(0, 0.12, 0),
+                new BS.Vector3(radius * 2, 0.26, radius * 2)
             ));
             await pit.SetLayer(5);
 
@@ -498,6 +573,67 @@
         state.stoneObjects[index] = [];
 
         return pit;
+    }
+
+    // Stone counts next to every pit and store, and a turn sign facing each player.
+    async function createLabels() {
+        const labels = await new BS.GameObject("Labels").Async();
+        await labels.SetParent(state.boardRoot, false);
+        await labels.AddComponent(new BS.Transform());
+
+        // Facing player 1 (on +z) or player 2 (on -z)
+        const upright = [new BS.Vector3(0, 180, 0), new BS.Vector3(0, 0, 0)];
+        const flat = [new BS.Vector3(90, 180, 0), new BS.Vector3(90, 0, 0)];
+        const edgeZ = LAYOUT.rowSpacing / 2 + LAYOUT.pitRadius + 0.07;
+
+        for (let i = 0; i < 14; i++) {
+            const c = pitCenter(i);
+            if (i === 6 || i === 13) {
+                // Stores: count floats above, readable from both sides
+                state.countTexts[i] = [];
+                for (let side = 0; side < 2; side++) {
+                    state.countTexts[i].push(await makeText(labels, "0",
+                        new BS.Vector3(c.x, 0.3, 0), upright[side], 1.2, 3, 1.5));
+                }
+            } else {
+                // Pits: count lies on the board at the owner's edge, readable by the owner
+                const owner = i < 6 ? 0 : 1;
+                const z = owner === 0 ? edgeZ : -edgeZ;
+                state.countTexts[i] = [await makeText(labels, "0",
+                    new BS.Vector3(c.x, 0.002, z), flat[owner], 0.8, 3, 1)];
+            }
+        }
+
+        for (let side = 0; side < 2; side++) {
+            state.statusTexts.push(await makeText(labels, "",
+                new BS.Vector3(0, 0.45, 0), upright[side], 1.4, 30, 2));
+        }
+    }
+
+    function statusFor(side) {
+        const game = state.game;
+        const me = side + 1;
+        const mine = game.pits[me === 1 ? 6 : 13];
+        const theirs = game.pits[me === 1 ? 13 : 6];
+        if (game.gameOver) {
+            if (game.winner === 'draw') return `Draw  ${mine} - ${theirs}`;
+            return game.winner === me ? `You win!  ${mine} - ${theirs}` : `Other side wins  ${mine} - ${theirs}`;
+        }
+        return game.currentPlayer === me ? "Your turn" : "Other side's turn";
+    }
+
+    // Puts a text label on a button's face (same approach as Go's buttons). `w` and `h` are the
+    // face size in metres; text is sized to fit it. `pos`/`rot` place the label on that face.
+    async function addButtonLabel(btn, text, w, h, pos, rot) {
+        const label = await new BS.GameObject("Label").Async();
+        await label.SetParent(btn, false);
+        const lt = await label.AddComponent(new BS.Transform());
+        lt.localPosition = pos;
+        lt.localEulerAngles = rot;
+        await label.AddComponent(new BS.BanterText(
+            text, new BS.Vector4(1, 1, 1, 1), BS.HorizontalAlignment.Center, BS.VerticalAlignment.Center,
+            h * 5, false, false, new BS.Vector2(w * 10, h * 10)
+        ));
     }
 
     async function createResetButton() {
@@ -514,17 +650,68 @@
             0.6, 0.15, 0.3
         ));
 
-        const redColor = new BS.Vector4(0.8, 0.2, 0.2, 1);
-        await btn.AddComponent(new BS.BanterMaterial("Unlit/Diffuse", "", redColor, BS.MaterialSide.Front, false));
+        const redColor = new BS.Vector4(0.8, 0.2, 0.2, config.hideUI ? 0 : 1);
+        await btn.AddComponent(new BS.BanterMaterial(shaderFor(config.hideUI), "", redColor, BS.MaterialSide.Front, false));
 
         await btn.AddComponent(new BS.BoxCollider(true, new BS.Vector3(0, 0, 0), new BS.Vector3(0.6, 0.15, 0.3)));
         await btn.SetLayer(5);
+        await addButtonLabel(btn, "RESET", 0.6, 0.3, new BS.Vector3(0, 0.080, 0), new BS.Vector3(90, 180, 0));
 
         btn.On('click', () => {
             console.log("Mancala: Resetting game...");
             state.game.reset();
             syncState();
         });
+    }
+
+    // --- Turn cooldown ---
+    // Stops one person from taking both sides' turns by accident (a double click, or moving again
+    // before the other player has had a chance). After you move, if it is now the other side's
+    // turn, you must wait `turnCooldown` seconds before you can move for them. Someone playing on
+    // their own can still play both sides; they just wait. Extra turns for the same side are not
+    // affected. The time is only ever compared on the mover's own clock.
+    const turnGuard = { lastMove: null, notice: '', noticeTimer: null };
+
+    function localUid() {
+        const user = BS.BanterScene.GetInstance().localUser;
+        return user && user.uid !== undefined ? String(user.uid) : null;
+    }
+
+    // True (and shows a notice) if the local user has to wait before moving for `side`.
+    function turnOnCooldown(side) {
+        const m = turnGuard.lastMove;
+        const uid = localUid();
+        if (!m || !uid || !(config.turnCooldown > 0) || m.uid !== uid || m.side === side) return false;
+        const left = config.turnCooldown * 1000 - (Date.now() - m.at);
+        if (left <= 0) return false;
+        showTurnNotice(`Other player's turn (${Math.ceil(left / 1000)}s)`);
+        return true;
+    }
+
+    // Marks outgoing state as a move by the local user for `side`.
+    function stampMove(data, side) {
+        turnGuard.lastMove = { uid: localUid(), side, at: Date.now() };
+        data.lastMove = turnGuard.lastMove;
+        return data;
+    }
+
+    // Call with every state loaded from the space. A reset has no lastMove, which clears it.
+    function loadLastMove(data) {
+        turnGuard.lastMove = (data && data.lastMove) || null;
+    }
+
+    function showTurnNotice(text) {
+        turnGuard.notice = text;
+        clearTimeout(turnGuard.noticeTimer);
+        turnGuard.noticeTimer = setTimeout(() => {
+            turnGuard.notice = '';
+            updateTurnBoard();
+        }, 2500);
+        updateTurnBoard();
+    }
+
+    function updateTurnBoard() {
+        state.statusTexts.forEach((t, side) => { t.text = turnGuard.notice || statusFor(side); });
     }
 
     function handlePitClick(pitIndex) {
@@ -544,16 +731,21 @@
             return;
         }
 
-        console.log(`Mancala: Player ${state.game.currentPlayer} clicked pit ${pitIndex}`);
+        if (turnOnCooldown(state.game.currentPlayer)) return;
+        const side = state.game.currentPlayer;
+
+        console.log(`Mancala: Player ${side} clicked pit ${pitIndex}`);
 
         if (state.game.makeMove(pitIndex)) {
-            syncState();
+            syncState(side);
         }
     }
 
-    function syncState() {
+    // `side` is the player who just moved; leave it out for a reset.
+    function syncState(side) {
         const key = `mancala_game_${config.instance}`;
         const data = state.game.getState();
+        if (side !== undefined) stampMove(data, side);
         BS.BanterScene.GetInstance().SetPublicSpaceProps({ [key]: JSON.stringify(data) });
         syncVisuals();
     }
@@ -583,41 +775,29 @@
     async function renderVisuals() {
         const game = state.game;
 
-        // Update stones in each pit
         for (let i = 0; i < 14; i++) {
-            const stoneCount = game.pits[i];
-            await updatePitStones(i, stoneCount);
+            await updatePitStones(i, game.pits[i]);
 
-            // Update pit highlighting (only for playable pits)
+            const texts = state.countTexts[i];
+            if (texts) texts.forEach(t => { t.text = String(game.pits[i]); });
+
+            // Highlight the pits the current player can pick from
             if (i !== 6 && i !== 13) {
-                const pitObj = state.pitObjects[i];
-                if (pitObj) {
-                    const mat = pitObj.GetComponent(materialType());
-                    if (mat) {
-                        const isOwnPit = game.isOwnPit(game.currentPlayer, i);
-                        const hasStones = game.pits[i] > 0;
-                        const isValid = !game.gameOver && isOwnPit && hasStones;
-
-                        let colorHex = COLORS.pit;
-                        if (isValid) {
-                            colorHex = COLORS.highlight;
-                        } else if (!isOwnPit) {
-                            colorHex = COLORS.inactive;
-                        }
-
-                        const color = hexToVector4(colorHex, config.hideBoard ? 0.3 : 1.0);
-                        mat.color = color;
-                    }
+                const mat = state.pitObjects[i]?.GetComponent(materialType());
+                if (mat) {
+                    const isValid = !game.gameOver && game.isOwnPit(game.currentPlayer, i) && game.pits[i] > 0;
+                    mat.color = hexToVector4(isValid ? COLORS.highlight : COLORS.pit, config.hideBoard ? 0.3 : 1.0);
                 }
             }
         }
+
+        updateTurnBoard();
     }
 
     async function updatePitStones(pitIndex, targetCount) {
         const currentStones = state.stoneObjects[pitIndex];
-        const currentCount = currentStones.length;
 
-        // Remove excess stones
+        // Remove excess stones (from the top of the heap)
         while (currentStones.length > targetCount) {
             const stone = currentStones.pop();
             if (stone && !stone.destroyed) {
@@ -635,61 +815,35 @@
     }
 
     async function createStone(pitIndex, stoneIndex) {
-        const pitObj = state.pitObjects[pitIndex];
-        if (!pitObj) return null;
-
-        const pitTrans = pitObj.GetComponent(BS.ComponentType.Transform);
-        const pitPos = pitTrans.localPosition;
+        const spots = state.stoneSpots[pitIndex];
+        const c = pitCenter(pitIndex);
+        if (!spots) return null;
+        const spot = spots[Math.min(stoneIndex, spots.length - 1)];
+        const r = LAYOUT.stoneRadius;
 
         const stone = await new BS.GameObject(`Stone_${pitIndex}_${stoneIndex}`).Async();
         await stone.SetParent(state.stonesRoot, false);
 
-        let st = await stone.AddComponent(new BS.Transform());
+        const st = await stone.AddComponent(new BS.Transform());
+        st.localPosition = new BS.Vector3(c.x + spot.x, spot.y, c.z + spot.z);
 
-        // Arrange stones in a nice pattern within the pit
-        const isStore = pitIndex === 6 || pitIndex === 13;
-        const pitRadius = isStore ? LAYOUT.storeRadius : LAYOUT.pitRadius;
-        const maxPerRing = isStore ? 8 : 5;
-
-        // Calculate position within pit
-        const ring = Math.floor(stoneIndex / maxPerRing);
-        const indexInRing = stoneIndex % maxPerRing;
-        const ringRadius = (ring + 1) * LAYOUT.stoneRadius * 2.5;
-        const angle = (indexInRing / maxPerRing) * Math.PI * 2 + ring * 0.5;
-
-        const offsetX = Math.cos(angle) * Math.min(ringRadius, pitRadius - LAYOUT.stoneRadius);
-        const offsetZ = Math.sin(angle) * Math.min(ringRadius, pitRadius - LAYOUT.stoneRadius);
-        const offsetY = LAYOUT.pitDepth / 2 + LAYOUT.stoneRadius + ring * LAYOUT.stoneRadius * 1.5;
-
-        st.localPosition = new BS.Vector3(
-            pitPos.x + offsetX,
-            offsetY,
-            pitPos.z + offsetZ
-        );
-
-        st.localScale = new BS.Vector3(1, 1, 1);
-
-        // Determine stone color based on which side of the board
-        const isP1Side = pitIndex <= 6;
-        const colorHex = isP1Side ? COLORS.stoneP1 : COLORS.stoneP2;
-        const color = hexToVector4(colorHex);
-        const shader = config.lighting === 'lit' ? "Standard" : "Unlit/Diffuse";
+        const colorHex = STONE_COLORS[(pitIndex * 3 + stoneIndex) % STONE_COLORS.length];
 
         if (config.useCustomModels) {
             const url = getModelUrl(PIECE_MODELS.stone);
             await stone.AddComponent(new BS.BanterGLTF(url, false, false, false, false, false, false));
-            st.localScale = new BS.Vector3(LAYOUT.stoneRadius * 2, LAYOUT.stoneRadius * 2, LAYOUT.stoneRadius * 2);
+            st.localScale = new BS.Vector3(r * 2, r * 2, r * 2);
         } else {
             await stone.AddComponent(new BS.BanterGeometry(
                 BS.GeometryType.SphereGeometry, null,
                 1, 1, 1, 24, 16, 1,
-                LAYOUT.stoneRadius, 24, 0, 6.283185, 0, 6.283185, 8, false,
-                LAYOUT.stoneRadius, LAYOUT.stoneRadius
+                r, 24, 0, 6.283185, 0, 6.283185, 8, false,
+                r, r
             ));
         }
 
         // Stones need unique material instance
-        await stone.AddComponent(new BS.BanterMaterial(shader, "", color, BS.MaterialSide.Front, false, `stone_${pitIndex}_${stoneIndex}`));
+        await stone.AddComponent(new BS.BanterMaterial(shaderFor(false), "", hexToVector4(colorHex), BS.MaterialSide.Front, false, `stone_${pitIndex}_${stoneIndex}`));
 
         return stone;
     }
@@ -709,6 +863,7 @@
         if (val) {
             try {
                 const data = JSON.parse(val);
+                loadLastMove(data);
                 state.game.loadState(data);
                 console.log("Mancala: Loaded existing state");
             } catch (e) {
@@ -730,6 +885,7 @@
                 if (val) {
                     try {
                         const data = JSON.parse(val);
+                        loadLastMove(data);
                         state.game.loadState(data);
                         syncVisuals();
                     } catch (e) {
