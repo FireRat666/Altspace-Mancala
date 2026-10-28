@@ -22,6 +22,12 @@
         instance: window.location.href.split('?')[0],
         hideUI: false,
         turnCooldown: 5, // Seconds before the same person can move for the other side; 0 = off
+        volume: 0.4, // Sound effect volume, 0-1; 0 = no sounds
+        soundNear: 2.5, // Metres from the game where sounds are at full volume
+        soundFar: 10, // Metres from the game where sounds fade out completely
+        mutePosition: null, // null (0 0 0) = automatic: beside the Reset button
+        muteRotation: [0, 0, 0],
+        muteScale: [1, 1, 1],
         hideBoard: false,
         useCustomModels: false,
         lighting: 'lit',
@@ -90,6 +96,12 @@
                 boardScale: ['scale', 'board-scale'],
                 hideUI: ['hide-ui'],
                 turnCooldown: ['turn-cooldown'],
+                volume: ['sound-volume'],
+                soundNear: ['sound-near'],
+                soundFar: ['sound-far'],
+                mutePosition: ['mute-position'],
+                muteRotation: ['mute-rotation'],
+                muteScale: ['mute-scale'],
                 hideBoard: ['hide-board'],
                 useCustomModels: ['use-custom-models'],
                 addLights: ['add-lights'],
@@ -128,6 +140,17 @@
         config.hideUI = getParam('hideUI', String(config.hideUI)) === 'true';
         config.turnCooldown = parseFloat(getParam('turnCooldown', String(config.turnCooldown)));
         if (isNaN(config.turnCooldown)) config.turnCooldown = 5;
+        config.volume = parseFloat(getParam('volume', String(config.volume)));
+        if (isNaN(config.volume)) config.volume = 0.4;
+        config.soundNear = parseFloat(getParam('soundNear', String(config.soundNear)));
+        if (isNaN(config.soundNear)) config.soundNear = 2.5;
+        config.soundFar = parseFloat(getParam('soundFar', String(config.soundFar)));
+        if (isNaN(config.soundFar)) config.soundFar = 10;
+        // 0 0 0 means automatic (beside the Reset button)
+        config.mutePosition = parseVector3(getParam('mutePosition'), null);
+        if (config.mutePosition && config.mutePosition.every(n => n === 0)) config.mutePosition = null;
+        config.muteRotation = parseVector3(getParam('muteRotation'), config.muteRotation);
+        config.muteScale = parseVector3(getParam('muteScale'), config.muteScale);
         config.hideBoard = getParam('hideBoard', String(config.hideBoard)) === 'true';
         config.instance = getParam('instance', config.instance);
         config.useCustomModels = getParam('useCustomModels', String(config.useCustomModels)) === 'true';
@@ -664,12 +687,250 @@
         await btn.AddComponent(new BS.BoxCollider(true, new BS.Vector3(0, 0, 0), new BS.Vector3(0.6, 0.15, 0.3)));
         await btn.SetLayer(5);
         await addButtonLabel(btn, "RESET", 0.6, 0.3, new BS.Vector3(0, 0.080, 0), new BS.Vector3(90, 180, 0));
+        await createMuteButton(btn, state.boardRoot, [0.6, 0.15, 0.3], true);
 
         btn.On('click', () => {
             console.log("Mancala: Resetting game...");
             state.game.reset();
             syncState();
         });
+    }
+
+    const SOUND_FILES = { seed: 4, capture: 1, bonus: 1, win: 1, draw: 1, reset: 1 }; // name: number of takes
+
+    // --- Sounds ---
+    // Short sound effects for moves, captures, wins and resets. Each client works out what changed
+    // between two game states and plays the matching sound, so everyone hears every move. Joining is
+    // silent, and our own move echoed back by the space only plays once. The files are in Sounds/
+    // next to this script (made by sound-tools/make_sounds.py). `volume` (0-1) sets the level;
+    // 0 turns sounds off.
+    const MUTE_KEY = 'banterGames_muted_mancala';
+    const sounds = { files: SOUND_FILES, cache: {}, live: false, prev: null, prevKey: null, muted: false };
+    try { sounds.muted = localStorage.getItem(MUTE_KEY) === '1'; } catch (e) { }
+
+    function soundAudio(file) {
+        let a = sounds.cache[file];
+        if (!a) {
+            a = sounds.cache[file] = new Audio(new URL(`Sounds/${file}.ogg`, scriptSrc || window.location.href).href);
+            a.preload = 'auto';
+        }
+        return a;
+    }
+
+    // `name` is a key of SOUND_FILES; ones with several takes pick one at random.
+    function playSound(name, delayMs = 0) {
+        if (!(config.volume > 0) || sounds.muted) return;
+        const volume = config.volume * distanceGain(config.boardPosition, config.soundNear, config.soundFar);
+        if (volume < 0.005) return; // too far away to hear
+        const takes = sounds.files[name] || 1;
+        const file = takes > 1 ? name + (1 + Math.floor(Math.random() * takes)) : name;
+        setTimeout(() => {
+            try {
+                const audio = soundAudio(file).cloneNode();
+                audio.volume = Math.min(1, volume);
+                audio.play().catch(() => {});
+            } catch (e) { }
+        }, delayMs);
+    }
+
+    // Call after every state change; repeats of the same state are ignored.
+    function soundForState() {
+        let next;
+        try { next = soundSnapshot(); } catch (e) { return; }
+        if (!next) return;
+        const key = JSON.stringify(next);
+        if (key === sounds.prevKey) return;
+        const prev = sounds.prev;
+        sounds.prev = JSON.parse(key);
+        sounds.prevKey = key;
+        if (sounds.live && prev) {
+            try { chooseSounds(prev, sounds.prev); } catch (e) { console.warn("Sound error", e); }
+        }
+    }
+
+    // Call once the saved game (if any) has loaded; sounds play from then on.
+    function startSounds() {
+        soundForState();
+        sounds.live = true;
+        headTracker();
+        if (config.volume > 0) {
+            for (const [name, takes] of Object.entries(sounds.files)) {
+                if (takes > 1) for (let i = 1; i <= takes; i++) soundAudio(name + i);
+                else soundAudio(name);
+            }
+        }
+    }
+
+    // --- Hearing distance ---
+    // Sounds fade with the local player's distance from the game: full volume within `near` metres,
+    // silent from `far` metres, so people elsewhere in the world aren't disturbed. The head position
+    // comes from an empty object attached to the player's head (Unity reports where it is), or from
+    // pose-update until that works. All the games on a page share one tracker.
+    function headTracker() {
+        if (window.BanterGamesHead) return window.BanterGamesHead;
+        const head = window.BanterGamesHead = { marker: null, attaching: false, markerPos: null, posePos: null };
+        const scene = BS.BanterScene.GetInstance();
+        scene.On('pose-update', e => {
+            const h = e && e.detail && e.detail.head;
+            if (h && h.position) head.posePos = h.position;
+        });
+        const attach = async () => {
+            const uid = scene.localUser && scene.localUser.uid;
+            if (!uid || head.marker || head.attaching) return;
+            head.attaching = true;
+            try {
+                const go = await new BS.GameObject("GameSoundsHead").Async();
+                head.marker = go;
+                if (typeof BS.AttachedObject === 'function') {
+                    const point = BS.AvatarBoneName ? BS.AvatarBoneName.HEAD : 0;
+                    const attached = await go.AddComponent(new BS.AttachedObject({ uid, avatarAttachmentPoint: point }));
+                    await attached.Attach(uid);
+                } else if (typeof scene.LegacyAttachObject === 'function' && BS.LegacyAttachmentPosition) {
+                    await scene.LegacyAttachObject(go, uid, BS.LegacyAttachmentPosition.HEAD);
+                } else {
+                    return; // no way to attach here: pose-update only
+                }
+                const PN = BS.PN || BS.PropertyName;
+                if (typeof go.WatchTransform === 'function' && PN) {
+                    await go.WatchTransform([PN.position], t => {
+                        if (head.marker === go && t && t.position) head.markerPos = t.position;
+                    });
+                }
+            } finally {
+                head.attaching = false;
+            }
+        };
+        const tryAttach = () => attach().catch(e => console.warn("Game sounds: could not follow the head", e));
+        // The SDK drops attachments when the player leaves, so the marker is made again when they
+        // come back (a moment later, so the SDK is ready).
+        scene.On('user-left', e => {
+            if (!(e && e.detail && e.detail.isLocal)) return;
+            try { if (head.marker) head.marker.Destroy(); } catch (err) { }
+            head.marker = null;
+            head.markerPos = null;
+        });
+        scene.On('user-joined', e => {
+            if (e && e.detail && e.detail.isLocal && !head.marker) setTimeout(tryAttach, 5000);
+        });
+        (async () => {
+            while (!scene.localUser || scene.localUser.uid === undefined) await new Promise(r => setTimeout(r, 500));
+            await tryAttach();
+        })();
+        return head;
+    }
+
+    // 0-1: how loud a sound from `centre` (a world position) is for the local player.
+    function distanceGain(centre, near, far) {
+        const head = headTracker();
+        const p = head.markerPos || head.posePos;
+        if (!p || !centre) return 1; // not known yet, so play it
+        const d = Math.hypot(p.x - centre.x, p.y - centre.y, p.z - centre.z);
+        if (d <= near) return 1;
+        if (!(far > near) || d >= far) return 0;
+        const f = 1 - (d - near) / (far - near);
+        return f * f;
+    }
+
+    // The mute button only mutes this game's sounds for you, and is remembered on this device. By
+    // default it sits beside the Reset button, attached to it so it follows it; set mutePosition
+    // (relative to the board) to place it on its own. `size` is the Reset button's
+    // [width, height, depth], and `flat` is true when it lies flat with its label on top.
+    async function createMuteButton(reset, parent, size, flat) {
+        if (!reset) return;
+        const v3 = a => Array.isArray(a) ? new BS.Vector3(...a) : a;
+        const [rw, h, d] = size;
+        const w = rw * 0.8;
+        const btn = await new BS.GameObject("MuteButton").Async();
+        const custom = !!config.mutePosition;
+        await btn.SetParent(custom ? parent : reset, false);
+        const t = await btn.AddComponent(new BS.Transform());
+        if (custom) {
+            t.localPosition = v3(config.mutePosition);
+        } else {
+            // Beside Reset, on the side away from the middle of the board
+            const side = config.resetPosition && config.resetPosition.x < 0 ? -1 : 1;
+            t.localPosition = new BS.Vector3(side * (rw / 2 + rw * 0.08 + w / 2), 0, 0);
+        }
+        t.localEulerAngles = v3(config.muteRotation);
+        t.localScale = v3(config.muteScale);
+        await btn.AddComponent(new BS.BanterGeometry(BS.GeometryType.BoxGeometry, null, w, h, d));
+        // With hideUI it's invisible but still clickable, with its label showing (like Reset)
+        const alpha = config.hideUI ? 0 : 1;
+        const shader = config.hideUI ? 'Unlit/DiffuseTransparent' : (config.lighting === 'lit' ? 'Standard' : 'Unlit/Diffuse');
+        const colour = () => sounds.muted ? new BS.Vector4(0.8, 0.42, 0.05, alpha) : new BS.Vector4(0.25, 0.25, 0.28, alpha);
+        const mat = await btn.AddComponent(new BS.BanterMaterial(shader, "", colour(), BS.MaterialSide.Front, false));
+        await btn.AddComponent(new BS.BoxCollider(true, new BS.Vector3(0, 0, 0), new BS.Vector3(w, h, d)));
+        await btn.SetLayer(5);
+        const label = await new BS.GameObject("Label").Async();
+        await label.SetParent(btn, false);
+        const lt = await label.AddComponent(new BS.Transform());
+        lt.localPosition = flat ? new BS.Vector3(0, h / 2 + 0.005, 0) : new BS.Vector3(0, 0, d / 2 + 0.005);
+        lt.localEulerAngles = flat ? new BS.Vector3(90, 180, 0) : new BS.Vector3(0, 180, 0);
+        const lh = flat ? d : h;
+        const text = await label.AddComponent(new BS.BanterText(
+            "", new BS.Vector4(1, 1, 1, 1), BS.HorizontalAlignment.Center, BS.VerticalAlignment.Center,
+            lh * 3.5, false, false, new BS.Vector2(w * 10, lh * 10)
+        ));
+        const update = () => {
+            text.text = sounds.muted ? "UNMUTE" : "MUTE";
+            mat.color = colour();
+        };
+        update();
+        btn.On('click', () => {
+            sounds.muted = !sounds.muted;
+            try { localStorage.setItem(MUTE_KEY, sounds.muted ? '1' : '0'); } catch (e) { }
+            update();
+        });
+    }
+
+    // Cells (of a 2D board) that differ between two boards.
+    function boardDiff(a, b) {
+        const out = [];
+        for (let r = 0; r < b.length; r++) {
+            for (let c = 0; c < b[r].length; c++) {
+                const was = a[r] ? a[r][c] : undefined;
+                if (was !== b[r][c]) out.push({ r, c, was, now: b[r][c] });
+            }
+        }
+        return out;
+    }
+
+    function soundSnapshot() {
+        const g = state.game;
+        return { pits: g.pits, currentPlayer: g.currentPlayer, winner: g.winner || null, gameOver: !!g.gameOver };
+    }
+
+    function chooseSounds(prev, next) {
+        const start = [4, 4, 4, 4, 4, 4, 0, 4, 4, 4, 4, 4, 4, 0];
+        if (next.pits.every((n, i) => n === start[i])) return playSound('reset');
+        // Work out which pit was played by replaying each possible move on the previous state.
+        const mover = prev.currentPlayer;
+        const own = mover === 1 ? [0, 1, 2, 3, 4, 5] : [7, 8, 9, 10, 11, 12];
+        const pit = own.find(i => {
+            if (!prev.pits[i]) return false;
+            const g = new MancalaGame();
+            g.loadState(prev);
+            return g.makeMove(i) && g.pits.every((n, j) => n === next.pits[j]);
+        });
+        if (pit === undefined) return;
+        // One click per seed dropped, so you can hear the sowing go round
+        const seeds = prev.pits[pit];
+        const gap = Math.max(55, Math.min(120, 900 / seeds));
+        for (let i = 0; i < seeds; i++) playSound('seed', i * gap);
+        let t = seeds * gap + 150;
+        // Where the last seed landed (the opponent's store is skipped)
+        let at = pit;
+        for (let left = seeds; left > 0;) {
+            at = (at + 1) % 14;
+            if (at !== (mover === 1 ? 13 : 6)) left--;
+        }
+        if (next.gameOver && !prev.gameOver) {
+            playSound(next.winner === 'draw' ? 'draw' : 'win', t);
+        } else if (own.includes(at) && next.pits[at] === 0) {
+            playSound('capture', t); // landed in an empty pit and took the seeds opposite
+        } else if (at === (mover === 1 ? 6 : 13)) {
+            playSound('bonus', t); // landed in own store: another turn
+        }
     }
 
     // --- Turn cooldown ---
@@ -764,6 +1025,7 @@
     let redrawing = null;
     let redrawAgain = false;
     function syncVisuals() {
+        soundForState();
         redrawAgain = true;
         if (!redrawing) {
             redrawing = (async () => {
@@ -878,6 +1140,7 @@
                 console.error("Failed to parse mancala state", e);
             }
         }
+        startSounds();
     }
 
     function setupListeners() {
