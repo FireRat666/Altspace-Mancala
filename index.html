@@ -9,7 +9,7 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#00ff44">
     <title>3D Multiplayer Mancala for AltspaceVR &amp; BanterVR | FireR.at</title>
-    <meta name="description" content="Synced 3D multiplayer Mancala board with a reset button for AltspaceVR (altvr.app) and BanterVR spaces. Drop-in <script> tag setup.">
+    <meta name="description" content="Synced 3D multiplayer Mancala board with seat locking for AltspaceVR (altvr.app) and BanterVR spaces. Drop-in <script> tag setup.">
     <meta name="keywords" content="VR Mancala, AltspaceVR Mancala, BanterVR Mancala, 3D multiplayer Mancala board, FireRat">
     <meta name="author" content="FireRat">
     <meta name="robots" content="index, follow">
@@ -32,7 +32,7 @@
       "name": "3D Mancala for AltspaceVR & BanterVR",
       "url": "https://mancala.firer.at/",
       "image": "https://cdn.sidequestvr.com/file/4763895/altspace-photo-20261027-211114-5b9d.jpg",
-      "description": "Synced 3D multiplayer Mancala board with a reset button for AltspaceVR (altvr.app) and BanterVR spaces.",
+      "description": "Synced 3D multiplayer Mancala board with seat locking for AltspaceVR (altvr.app) and BanterVR spaces.",
       "genre": ["Board Game", "Strategy Game", "Multiplayer VR"],
       "gamePlatform": ["AltspaceVR", "BanterVR"],
       "playMode": "MultiPlayer",
@@ -111,7 +111,7 @@
 
       <section class="info-block">
         <h2>Features</h2>
-        <ul><li>Standard Kalah rules, with captures and extra turns</li><li>Reset button</li><li>Several independent boards in one world</li></ul>
+        <ul><li>Standard Kalah rules, with captures and extra turns</li><li>A turn panel with seats, Reset and Mute</li><li>Seat locking</li><li>Switches itself off when you are far away</li><li>Several independent boards in one world</li></ul>
       </section>
 
       <section class="info-block">
@@ -125,7 +125,7 @@
     </main>
 
     <footer>
-      <p>Synced multiplayer Mancala board with a reset button. Open <a href="https://mancala.firer.at">mancala.firer.at</a> as a space in Altspace or Banter to try it.</p>
+      <p>Synced multiplayer Mancala board with seat locking. Open <a href="https://mancala.firer.at">mancala.firer.at</a> as a space in Altspace or Banter to try it.</p>
       <p>&copy; <span class="fire-year"></span> <a href="https://firer.at/">FireR.at</a></p>
     </footer>
   </div>
@@ -187,7 +187,7 @@
     -->
     <!-- snippet section -->
     <bs-snippet name="mancala" title="Mancala"
-      description="Synced multiplayer Mancala board with a reset button."
+      description="Synced multiplayer Mancala board with seat locking."
       script="https://mancala.firer.at/snippet.js"
       room=""
       position="0 1 2"
@@ -196,17 +196,13 @@
       lit="true"
       add-lights="false"
       turn-cooldown="5"
+      lock-timeout="90"
+      cull-distance="20"
       sound-volume="0.4"
       sound-near="2.5"
       sound-far="10"
       hide-ui="false"
-      hide-board="false"
-      reset-position="0 0 1.5"
-      reset-rotation="0 0 0"
-      reset-scale="1"
-      mute-position="0 0 0"
-      mute-rotation="0 0 0"
-      mute-scale="1">
+      hide-board="false">
       <bs-gizmo type="position" attribute="position"/>
       <bs-gizmo type="box" attribute="position" size="2.15 0.1 0.68"/>
     </bs-snippet>

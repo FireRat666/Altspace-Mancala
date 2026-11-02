@@ -1,5 +1,5 @@
 <bs-snippet name="mancala" title="Mancala"
-  description="Synced multiplayer Mancala board with a reset button."
+  description="Synced multiplayer Mancala board with seat locking."
   script="https://mancala.firer.at/snippet.js"
   room=""
   position="0 1 2"
@@ -8,17 +8,13 @@
   lit="true"
   add-lights="false"
   turn-cooldown="5"
+  lock-timeout="90"
+  cull-distance="20"
   sound-volume="0.4"
   sound-near="2.5"
   sound-far="10"
   hide-ui="false"
-  hide-board="false"
-  reset-position="0 0 1.5"
-  reset-rotation="0 0 0"
-  reset-scale="1"
-  mute-position="0 0 0"
-  mute-rotation="0 0 0"
-  mute-scale="1">
+  hide-board="false">
   <bs-gizmo type="position" attribute="position"/>
   <bs-gizmo type="box" attribute="position" size="2.15 0.1 0.68"/>
 </bs-snippet>

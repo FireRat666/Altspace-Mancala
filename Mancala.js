@@ -16,18 +16,14 @@
         boardPosition: [0, 1.1, -2],
         boardRotation: [0, 0, 0],
         boardScale: [1, 1, 1],
-        resetPosition: [0, 0, 1.5],
-        resetRotation: [0, 0, 0],
-        resetScale: [1, 1, 1],
         instance: window.location.href.split('?')[0],
         hideUI: false,
         turnCooldown: 5, // Seconds before the same person can move for the other side; 0 = off
+        lockTimeout: 90, // Seconds a seated player can leave their turn before others can take the seat; 0 = off
+        cullDistance: 20, // Metres from the game beyond which it switches itself off; 0 = always on
         volume: 0.4, // Sound effect volume, 0-1; 0 = no sounds
         soundNear: 2.5, // Metres from the game where sounds are at full volume
         soundFar: 10, // Metres from the game where sounds fade out completely
-        mutePosition: null, // null (0 0 0) = automatic: beside the Reset button
-        muteRotation: [0, 0, 0],
-        muteScale: [1, 1, 1],
         hideBoard: false,
         useCustomModels: false,
         lighting: 'lit',
@@ -96,12 +92,11 @@
                 boardScale: ['scale', 'board-scale'],
                 hideUI: ['hide-ui'],
                 turnCooldown: ['turn-cooldown'],
+                lockTimeout: ['lock-timeout', 'seat-timeout', 'idle-timeout'],
+                cullDistance: ['cull-distance', 'render-distance'],
                 volume: ['sound-volume'],
                 soundNear: ['sound-near'],
                 soundFar: ['sound-far'],
-                mutePosition: ['mute-position'],
-                muteRotation: ['mute-rotation'],
-                muteScale: ['mute-scale'],
                 hideBoard: ['hide-board'],
                 useCustomModels: ['use-custom-models'],
                 addLights: ['add-lights'],
@@ -110,13 +105,7 @@
                 piecesOpacity: ['pieces-opacity'],
                 scoreboardPosition: ['scoreboard-position'],
                 scoreboardRotation: ['scoreboard-rotation'],
-                scoreboardScale: ['scoreboard-scale'],
-                resetPosition: ['reset-position'],
-                resetRotation: ['reset-rotation'],
-                resetScale: ['reset-scale'],
-                passPosition: ['pass-position'],
-                passRotation: ['pass-rotation'],
-                passScale: ['pass-scale']
+                scoreboardScale: ['scoreboard-scale']
             };
 
             if (aliases[name]) {
@@ -140,17 +129,19 @@
         config.hideUI = getParam('hideUI', String(config.hideUI)) === 'true';
         config.turnCooldown = parseFloat(getParam('turnCooldown', String(config.turnCooldown)));
         if (isNaN(config.turnCooldown)) config.turnCooldown = 5;
+        config.lockTimeout = parseFloat(getParam('lockTimeout', String(config.lockTimeout)));
+        if (isNaN(config.lockTimeout)) config.lockTimeout = 90;
+        config.cullDistance = parseFloat(getParam('cullDistance', String(config.cullDistance)));
+        if (isNaN(config.cullDistance)) config.cullDistance = 20;
+        config.scoreboardPosition = parseVector3(getParam('scoreboardPosition'), null);
+        config.scoreboardRotation = parseVector3(getParam('scoreboardRotation'), null);
+        config.scoreboardScale = parseVector3(getParam('scoreboardScale'), null);
         config.volume = parseFloat(getParam('volume', String(config.volume)));
         if (isNaN(config.volume)) config.volume = 0.4;
         config.soundNear = parseFloat(getParam('soundNear', String(config.soundNear)));
         if (isNaN(config.soundNear)) config.soundNear = 2.5;
         config.soundFar = parseFloat(getParam('soundFar', String(config.soundFar)));
         if (isNaN(config.soundFar)) config.soundFar = 10;
-        // 0 0 0 means automatic (beside the Reset button)
-        config.mutePosition = parseVector3(getParam('mutePosition'), null);
-        if (config.mutePosition && config.mutePosition.every(n => n === 0)) config.mutePosition = null;
-        config.muteRotation = parseVector3(getParam('muteRotation'), config.muteRotation);
-        config.muteScale = parseVector3(getParam('muteScale'), config.muteScale);
         config.hideBoard = getParam('hideBoard', String(config.hideBoard)) === 'true';
         config.instance = getParam('instance', config.instance);
         config.useCustomModels = getParam('useCustomModels', String(config.useCustomModels)) === 'true';
@@ -164,9 +155,6 @@
         config.boardPosition = parseVector3(getParam('boardPosition'), config.boardPosition);
         config.boardRotation = parseVector3(getParam('boardRotation'), config.boardRotation);
 
-        config.resetPosition = parseVector3(getParam('resetPosition'), config.resetPosition);
-        config.resetRotation = parseVector3(getParam('resetRotation'), config.resetRotation);
-        config.resetScale = parseVector3(getParam('resetScale'), config.resetScale);
     }
 
     // Model URLs for custom pieces
@@ -360,7 +348,6 @@
         stoneObjects: [],  // Array of arrays - stones per pit
         stoneSpots: [],    // Per pit: where each stone rests
         countTexts: [],    // Per pit: BanterText components showing the stone count
-        statusTexts: [],   // [facing player 1's side, facing player 2's side]
         game: new MancalaGame()
     };
 
@@ -488,8 +475,24 @@
         if (!config.hideUI) {
             await createLabels();
         }
-        // With hideUI the reset button is invisible but still clickable, with its label showing (as in Go)
-        await createResetButton();
+        panel = createGamePanel({
+            title: "Mancala",
+            key: `mancala_game_${config.instance}`,
+            root: state.boardRoot,
+            centre: config.boardPosition,
+            sides: [
+                { id: 1, label: 'PLAYER 1', bg: '#6d4c41', fg: '#ffffff' },
+                { id: 2, label: 'PLAYER 2', bg: '#d7ccc8', fg: '#111111' }
+            ],
+            turn: () => state.game.gameOver ? null : state.game.currentPlayer,
+            status: turnStatusText,
+            resetFreely: () => state.game.gameOver || state.game.pits.every((n, i) => n === (i === 6 || i === 13 ? 0 : 4)),
+            reset: () => { state.game.reset(); syncState(); },
+            getState: () => state.game.getState(),
+            position: [0, 0.75, 0],
+            scale: 0.14
+        });
+        await panel.build();
 
         // Setup sync listeners
         setupListeners();
@@ -622,7 +625,6 @@
             }
         }
 
-        state.statusTexts = await makeTwoSidedSign(labels, new BS.Vector3(0, 0.62, 0), 1.9, 0.26, 1.2);
     }
 
     // A thin wooden sign with text on both faces. The sign sits between the two texts so each
@@ -639,61 +641,6 @@
             await makeText(sign, "", new BS.Vector3(0, 0, 0.007), new BS.Vector3(0, 180, 0), fontSize, w * 10, h * 10),
             await makeText(sign, "", new BS.Vector3(0, 0, -0.007), new BS.Vector3(0, 0, 0), fontSize, w * 10, h * 10)
         ];
-    }
-
-    function statusFor(side) {
-        const game = state.game;
-        const me = side + 1;
-        const mine = game.pits[me === 1 ? 6 : 13];
-        const theirs = game.pits[me === 1 ? 13 : 6];
-        if (game.gameOver) {
-            if (game.winner === 'draw') return `Draw  ${mine} - ${theirs}`;
-            return game.winner === me ? `You win!  ${mine} - ${theirs}` : `Other side wins  ${mine} - ${theirs}`;
-        }
-        return game.currentPlayer === me ? "Your turn" : "Other side's turn";
-    }
-
-    // Puts a text label on a button's face (same approach as Go's buttons). `w` and `h` are the
-    // face size in metres; text is sized to fit it. `pos`/`rot` place the label on that face.
-    async function addButtonLabel(btn, text, w, h, pos, rot) {
-        const label = await new BS.GameObject("Label").Async();
-        await label.SetParent(btn, false);
-        const lt = await label.AddComponent(new BS.Transform());
-        lt.localPosition = pos;
-        lt.localEulerAngles = rot;
-        await label.AddComponent(new BS.BanterText(
-            text, new BS.Vector4(1, 1, 1, 1), BS.HorizontalAlignment.Center, BS.VerticalAlignment.Center,
-            h * 5, false, false, new BS.Vector2(w * 10, h * 10)
-        ));
-    }
-
-    async function createResetButton() {
-        const btn = await new BS.GameObject("ResetButton").Async();
-        await btn.SetParent(state.boardRoot, false);
-
-        let trans = await btn.AddComponent(new BS.Transform());
-        trans.localPosition = config.resetPosition;
-        trans.localEulerAngles = config.resetRotation;
-        trans.localScale = config.resetScale;
-
-        await btn.AddComponent(new BS.BanterGeometry(
-            BS.GeometryType.BoxGeometry, null,
-            0.6, 0.15, 0.3
-        ));
-
-        const redColor = new BS.Vector4(0.8, 0.2, 0.2, config.hideUI ? 0 : 1);
-        await btn.AddComponent(new BS.BanterMaterial(shaderFor(config.hideUI), "", redColor, BS.MaterialSide.Front, false));
-
-        await btn.AddComponent(new BS.BoxCollider(true, new BS.Vector3(0, 0, 0), new BS.Vector3(0.6, 0.15, 0.3)));
-        await btn.SetLayer(5);
-        await addButtonLabel(btn, "RESET", 0.6, 0.3, new BS.Vector3(0, 0.080, 0), new BS.Vector3(90, 180, 0));
-        await createMuteButton(btn, state.boardRoot, [0.6, 0.15, 0.3], true);
-
-        btn.On('click', () => {
-            console.log("Mancala: Resetting game...");
-            state.game.reset();
-            syncState();
-        });
     }
 
     const SOUND_FILES = { seed: 4, capture: 1, bonus: 1, win: 1, draw: 1, reset: 1 }; // name: number of takes
@@ -831,58 +778,6 @@
         return f * f;
     }
 
-    // The mute button only mutes this game's sounds for you, and is remembered on this device. By
-    // default it sits beside the Reset button, attached to it so it follows it; set mutePosition
-    // (relative to the board) to place it on its own. `size` is the Reset button's
-    // [width, height, depth], and `flat` is true when it lies flat with its label on top.
-    async function createMuteButton(reset, parent, size, flat) {
-        if (!reset) return;
-        const v3 = a => Array.isArray(a) ? new BS.Vector3(...a) : a;
-        const [rw, h, d] = size;
-        const w = rw * 0.8;
-        const btn = await new BS.GameObject("MuteButton").Async();
-        const custom = !!config.mutePosition;
-        await btn.SetParent(custom ? parent : reset, false);
-        const t = await btn.AddComponent(new BS.Transform());
-        if (custom) {
-            t.localPosition = v3(config.mutePosition);
-        } else {
-            // Beside Reset, on the side away from the middle of the board
-            const side = config.resetPosition && config.resetPosition.x < 0 ? -1 : 1;
-            t.localPosition = new BS.Vector3(side * (rw / 2 + rw * 0.08 + w / 2), 0, 0);
-        }
-        t.localEulerAngles = v3(config.muteRotation);
-        t.localScale = v3(config.muteScale);
-        await btn.AddComponent(new BS.BanterGeometry(BS.GeometryType.BoxGeometry, null, w, h, d));
-        // With hideUI it's invisible but still clickable, with its label showing (like Reset)
-        const alpha = config.hideUI ? 0 : 1;
-        const shader = config.hideUI ? 'Unlit/DiffuseTransparent' : (config.lighting === 'lit' ? 'Standard' : 'Unlit/Diffuse');
-        const colour = () => sounds.muted ? new BS.Vector4(0.8, 0.42, 0.05, alpha) : new BS.Vector4(0.25, 0.25, 0.28, alpha);
-        const mat = await btn.AddComponent(new BS.BanterMaterial(shader, "", colour(), BS.MaterialSide.Front, false));
-        await btn.AddComponent(new BS.BoxCollider(true, new BS.Vector3(0, 0, 0), new BS.Vector3(w, h, d)));
-        await btn.SetLayer(5);
-        const label = await new BS.GameObject("Label").Async();
-        await label.SetParent(btn, false);
-        const lt = await label.AddComponent(new BS.Transform());
-        lt.localPosition = flat ? new BS.Vector3(0, h / 2 + 0.005, 0) : new BS.Vector3(0, 0, d / 2 + 0.005);
-        lt.localEulerAngles = flat ? new BS.Vector3(90, 180, 0) : new BS.Vector3(0, 180, 0);
-        const lh = flat ? d : h;
-        const text = await label.AddComponent(new BS.BanterText(
-            "", new BS.Vector4(1, 1, 1, 1), BS.HorizontalAlignment.Center, BS.VerticalAlignment.Center,
-            lh * 3.5, false, false, new BS.Vector2(w * 10, lh * 10)
-        ));
-        const update = () => {
-            text.text = sounds.muted ? "UNMUTE" : "MUTE";
-            mat.color = colour();
-        };
-        update();
-        btn.On('click', () => {
-            sounds.muted = !sounds.muted;
-            try { localStorage.setItem(MUTE_KEY, sounds.muted ? '1' : '0'); } catch (e) { }
-            update();
-        });
-    }
-
     // Cells (of a 2D board) that differ between two boards.
     function boardDiff(a, b) {
         const out = [];
@@ -939,7 +834,7 @@
     // turn, you must wait `turnCooldown` seconds before you can move for them. Someone playing on
     // their own can still play both sides; they just wait. Extra turns for the same side are not
     // affected. The time is only ever compared on the mover's own clock.
-    const turnGuard = { lastMove: null, notice: '', noticeTimer: null };
+    const turnGuard = { lastMove: null };
 
     function localUid() {
         const user = BS.BanterScene.GetInstance().localUser;
@@ -969,18 +864,11 @@
         turnGuard.lastMove = (data && data.lastMove) || null;
     }
 
-    function showTurnNotice(text) {
-        turnGuard.notice = text;
-        clearTimeout(turnGuard.noticeTimer);
-        turnGuard.noticeTimer = setTimeout(() => {
-            turnGuard.notice = '';
-            updateTurnBoard();
-        }, 2500);
-        updateTurnBoard();
-    }
-
-    function updateTurnBoard() {
-        state.statusTexts.forEach((t, side) => { t.text = turnGuard.notice || statusFor(side); });
+    function turnStatusText() {
+        const g = state.game;
+        const score = `${g.pits[6]} - ${g.pits[13]}`;
+        if (g.gameOver) return g.winner === 'draw' ? `Draw!  ${score}` : `Player ${g.winner} wins!  ${score}`;
+        return `Player ${g.currentPlayer}'s turn  ${score}`;
     }
 
     function handlePitClick(pitIndex) {
@@ -1000,6 +888,7 @@
             return;
         }
 
+        if (!panel.mayMove(state.game.currentPlayer)) return;
         if (turnOnCooldown(state.game.currentPlayer)) return;
         const side = state.game.currentPlayer;
 
@@ -1015,6 +904,7 @@
         const key = `mancala_game_${config.instance}`;
         const data = state.game.getState();
         if (side !== undefined) stampMove(data, side);
+        panel.stamp(data);
         BS.BanterScene.GetInstance().SetPublicSpaceProps({ [key]: JSON.stringify(data) });
         syncVisuals();
     }
@@ -1135,6 +1025,7 @@
                 const data = JSON.parse(val);
                 loadLastMove(data);
                 state.game.loadState(data);
+                panel.load(data);
                 console.log("Mancala: Loaded existing state");
             } catch (e) {
                 console.error("Failed to parse mancala state", e);
@@ -1158,6 +1049,7 @@
                         const data = JSON.parse(val);
                         loadLastMove(data);
                         state.game.loadState(data);
+                        panel.load(data);
                         syncVisuals();
                     } catch (e) {
                         console.error(e);
@@ -1165,6 +1057,313 @@
                 }
             }
         });
+    }
+
+    function showTurnNotice(text) { if (panel) panel.notice(text); }
+    function updateTurnBoard() { if (panel) panel.update(); }
+
+    let panel = null;
+    // --- Game panel: turn, seats, Reset and Mute, seat locking, and switching off when far away ---
+    // The same code is in each of the two-player board games (it started in Chess). It uses the
+    // game's own `config`, `sounds`, `MUTE_KEY`, `headTracker` and `localUid`.
+    //
+    // Seats: each side can be claimed by one player, and then only they can move for it. A seat can
+    // be taken over when its player has left the space, or has left their turn untouched for
+    // `lockTimeout` seconds. Unclaimed sides can be moved by anyone. While a game is under way only
+    // its seated players (or the space host) can reset it, unless a seat is empty or idle.
+    //
+    // Switching off: beyond `cullDistance` metres the game's root object is switched off and the
+    // panel removed (a BanterUI panel loses its contents when switched off, so it is built again on
+    // the way back). Moves made meanwhile still arrive and show when the player returns.
+    //
+    // opts: {
+    //   title, key (space state key), root (GameObject), centre (world Vector3),
+    //   sides: [{ id, label, bg, fg }]   id = the side value the game uses for turns,
+    //   turn(): side id whose turn it is, or null when the game is over,
+    //   status(): text for the header,
+    //   resetFreely(): true when anyone may reset (nothing played yet, or the game is over),
+    //   reset(): resets the game (and syncs it),
+    //   getState(): the game's current state object, used when only the seats change,
+    //   buttons: [{ text, color, onClick }]   extra buttons beside Reset,
+    //   position: [x, y, z] default panel position relative to the root,
+    //   scale: default panel scale (multiplied by config.scoreboardScale)
+    // }
+    function createGamePanel(opts) {
+        const scene = BS.BanterScene.GetInstance();
+        const P = { seats: {}, lastActionTime: 0, data: null, ui: null, building: null, culled: false, notice: '', noticeTimer: null };
+        const v3 = a => Array.isArray(a) ? new BS.Vector3(...a) : a;
+
+        const me = () => {
+            const u = scene.localUser;
+            return u && u.uid !== undefined ? { uid: String(u.uid), name: u.name || 'Player' } : null;
+        };
+        const present = uid => !!uid && ((scene.localUser && String(scene.localUser.uid) === String(uid)) || !!(scene.users && scene.users[uid]));
+        // Idle: it is that side's turn and nothing has happened for lockTimeout seconds.
+        const idle = side => {
+            if (!(config.lockTimeout > 0) || opts.turn() !== side || !P.lastActionTime) return false;
+            return Date.now() - P.lastActionTime > config.lockTimeout * 1000;
+        };
+        const free = side => { const s = P.seats[side]; return !s || !present(s.uid) || idle(side); };
+        const isHost = () => {
+            const m = me();
+            if (!m) return false;
+            if (scene.space && scene.space.owner && String(scene.space.owner.uid) === m.uid) return true;
+            const uids = Object.keys(scene.users || {}).map(String).sort();
+            return uids.length > 0 && uids[0] === m.uid;
+        };
+
+        // --- State ---
+        // Adds the seats to an outgoing game state. Call for every state the game writes.
+        function stamp(data) {
+            data.seats = { ...P.seats };
+            data.lastActionTime = Date.now();
+            P.data = data;
+            P.lastActionTime = data.lastActionTime;
+            return data;
+        }
+        // Call with every game state loaded from the space.
+        function load(data) {
+            P.data = data || null;
+            P.seats = (data && data.seats) || {};
+            P.lastActionTime = (data && data.lastActionTime) || 0;
+            update();
+        }
+        function writeSeats(seats) {
+            P.seats = seats;
+            const base = P.data || opts.getState();
+            const data = stamp({ ...base, seats });
+            scene.SetPublicSpaceProps({ [opts.key]: JSON.stringify(data) });
+            update();
+        }
+
+        // --- Rules ---
+        // True if the local player may move for `side`. Takes over an abandoned seat; otherwise
+        // shows a notice and returns false when someone else holds it.
+        function mayMove(side) {
+            const seat = P.seats[side];
+            if (!seat) return true;
+            const m = me();
+            if (m && String(seat.uid) === m.uid) return true;
+            if (m && free(side)) {
+                const label = (opts.sides.find(s => s.id === side) || {}).label || side;
+                notice(`${label} was ${present(seat.uid) ? 'idle' : 'empty'} - seat taken`);
+                const seats = { ...P.seats, [side]: { uid: m.uid, name: m.name } };
+                for (const s of opts.sides) if (s.id !== side && seats[s.id] && String(seats[s.id].uid) === m.uid) seats[s.id] = null;
+                P.seats = seats; // the move that follows writes them
+                return true;
+            }
+            notice(`It is ${seat.name}'s turn`);
+            return false;
+        }
+        function mayReset() {
+            if (opts.resetFreely()) return true;
+            const claimed = opts.sides.filter(s => P.seats[s.id]);
+            if (claimed.length === 0) return true;
+            const m = me();
+            if (m && claimed.some(s => String(P.seats[s.id].uid) === m.uid)) return true;
+            if (isHost()) return true;
+            if (opts.sides.some(s => P.seats[s.id] && free(s.id))) return true;
+            notice("Only the seated players can reset a game in progress");
+            return false;
+        }
+        function clickSeat(side) {
+            const m = me();
+            if (!m) return notice("Could not find your user id");
+            const seat = P.seats[side];
+            const label = (opts.sides.find(s => s.id === side) || {}).label || side;
+            if (seat && String(seat.uid) === m.uid) {
+                writeSeats({ ...P.seats, [side]: null });
+                notice(`You left ${label}`);
+            } else if (!seat || free(side)) {
+                const seats = { ...P.seats, [side]: { uid: m.uid, name: m.name } };
+                for (const s of opts.sides) if (s.id !== side && seats[s.id] && String(seats[s.id].uid) === m.uid) seats[s.id] = null;
+                writeSeats(seats);
+                notice(`You took ${label}`);
+            } else {
+                notice(`${label} is taken by ${seat.name}`);
+            }
+        }
+        function clickReset() {
+            if (!mayReset()) return;
+            opts.reset();
+            notice("Game reset");
+        }
+
+        // --- Panel ---
+        function notice(text) {
+            P.notice = text;
+            clearTimeout(P.noticeTimer);
+            P.noticeTimer = setTimeout(() => { P.notice = ''; update(); }, 3000);
+            update();
+        }
+        function seatText(side) {
+            const seat = P.seats[side.id];
+            const m = me();
+            if (!seat) return `${side.label}: [CLAIM]`;
+            if (m && String(seat.uid) === m.uid) return `${side.label}: YOU [LEAVE]`;
+            if (!present(seat.uid)) return `${side.label}: Left [TAKE]`;
+            if (idle(side.id)) return `${side.label}: ${seat.name} (idle) [TAKE]`;
+            return `${side.label}: ${seat.name}`;
+        }
+        function update() {
+            const ui = P.ui;
+            if (!ui || P.culled) return;
+            try {
+                ui.status.text = opts.status();
+                ui.notice.text = P.notice;
+                if (ui.mute) ui.mute.text = sounds.muted ? "UNMUTE" : "MUTE";
+                const turn = opts.turn();
+                const m = me();
+                for (const side of opts.sides) {
+                    const btn = ui.seatBtns[side.id];
+                    const seat = P.seats[side.id];
+                    btn.text = seatText(side);
+                    let border = '#666666';
+                    if (seat && !present(seat.uid)) border = '#e57373';
+                    else if (seat && idle(side.id)) border = '#ffb300';
+                    else if (turn === side.id) border = '#4CAF50';
+                    else if (seat && m && String(seat.uid) === m.uid) border = '#2e7d32';
+                    btn.SetStyles({ borderColor: border, borderWidth: turn === side.id ? '4px' : '2px' });
+                }
+            } catch (e) { }
+        }
+
+        async function build() {
+            if (config.hideUI || P.ui || P.building) return;
+            P.building = (async () => {
+                const pos = config.scoreboardPosition && !config.scoreboardPosition.every(n => n === 0) ? config.scoreboardPosition : opts.position;
+                const mul = config.scoreboardScale || [1, 1, 1];
+                const base = opts.scale || 0.24;
+                const obj = await new BS.GameObject({
+                    name: opts.title + "_Panel",
+                    parent: opts.root,
+                    localPosition: v3(pos),
+                    localEulerAngles: v3(config.scoreboardRotation || [0, 0, 0]),
+                    localScale: new BS.Vector3(base * mul[0], base * mul[1], base * mul[2])
+                }).Async();
+                const bb = await obj.AddComponent(new BS.BanterBillboard({ smoothing: 1, enableXAxis: false, enableYAxis: true }));
+                bb.enableXAxis = false;
+                const panel = await obj.AddComponent(new BS.BanterUI(new BS.Vector2(650, 270), false));
+                const clear = { backgroundColor: 'rgba(0,0,0,0)' };
+                const rootEl = panel.CreateVisualElement();
+                await rootEl.Async();
+                rootEl.SetStyles({
+                    backgroundColor: 'rgba(15, 18, 26, 0.94)', display: 'flex', flexDirection: 'column',
+                    alignItems: 'center', justifyContent: 'space-between',
+                    paddingTop: '14px', paddingBottom: '14px', paddingLeft: '18px', paddingRight: '18px',
+                    borderRadius: '16px', borderWidth: '3px', borderColor: 'rgba(80, 95, 125, 0.85)',
+                    width: '100%', height: '100%'
+                });
+                if (rootEl.parent && rootEl.parent.SetStyles) rootEl.parent.SetStyles(clear);
+                const row = async (extra) => {
+                    const r = panel.CreateVisualElement(rootEl);
+                    await r.Async();
+                    r.SetStyles({ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%', ...clear, ...extra });
+                    return r;
+                };
+                const label = async (parent, text, styles) => {
+                    const l = panel.CreateLabel(undefined, parent);
+                    await l.Async();
+                    l.text = text;
+                    l.SetStyles({ ...clear, ...styles });
+                    return l;
+                };
+                const button = async (parent, text, styles, onClick) => {
+                    const b = panel.CreateButton(parent);
+                    await b.Async();
+                    if (b.parent && b.parent.SetStyles) b.parent.SetStyles({ ...clear, backgroundImage: 'none' });
+                    b.text = text;
+                    b.SetStyles({ color: 'white', fontWeight: 'bold', borderRadius: '8px', borderWidth: '0px', backgroundImage: 'none', ...styles });
+                    b.OnClick(() => { try { onClick(); } catch (e) { console.error(opts.title + ": button error", e); } });
+                    return b;
+                };
+
+                const header = await row({ marginBottom: '4px' });
+                await label(header, opts.title.toUpperCase(), { color: '#f0f0f0', fontSize: '26px', fontWeight: 'bold', marginRight: '10px' });
+                const status = await label(header, '', { color: '#ffcc00', fontSize: '24px', fontWeight: 'bold', textAlign: 'center', flexGrow: '1' });
+
+                const seatsRow = await row({ marginTop: '6px', marginBottom: '6px' });
+                const seatBtns = {};
+                for (const side of opts.sides) {
+                    seatBtns[side.id] = await button(seatsRow, '', {
+                        backgroundColor: side.bg, color: side.fg, fontSize: '20px',
+                        paddingTop: '10px', paddingBottom: '10px', paddingLeft: '10px', paddingRight: '10px',
+                        borderWidth: '2px', borderColor: '#666666', flexGrow: '1', flexBasis: '0', marginLeft: '6px', marginRight: '6px'
+                    }, () => clickSeat(side.id));
+                }
+
+                const actions = await row({});
+                const small = { fontSize: '18px', paddingTop: '8px', paddingBottom: '8px', paddingLeft: '18px', paddingRight: '18px', marginRight: '10px' };
+                await button(actions, "RESET", { backgroundColor: '#c62828', ...small }, clickReset);
+                for (const extra of (opts.buttons || [])) await button(actions, extra.text, { backgroundColor: extra.color || '#1565c0', ...small }, extra.onClick);
+                const mute = await button(actions, sounds.muted ? "UNMUTE" : "MUTE", { backgroundColor: '#37474f', ...small }, () => {
+                    sounds.muted = !sounds.muted;
+                    try { localStorage.setItem(MUTE_KEY, sounds.muted ? '1' : '0'); } catch (e) { }
+                    update();
+                });
+                const noticeLabel = await label(actions, '', { color: '#ff7043', fontSize: '16px', textAlign: 'right', flexGrow: '1' });
+
+                P.ui = { obj, status, seatBtns, mute, notice: noticeLabel };
+                update();
+            })().catch(e => console.warn(opts.title + ": could not build the panel", e)).finally(() => {
+                P.building = null;
+                if (P.culled) destroyUI(); // went out of range while it was being built
+            });
+            return P.building;
+        }
+        function destroyUI() {
+            if (!P.ui) return;
+            const obj = P.ui.obj;
+            P.ui = null;
+            try { obj.Destroy(); } catch (e) { }
+        }
+
+        // --- Switching off when far away ---
+        function setCulled(culled) {
+            P.culled = culled;
+            if (culled) destroyUI();
+            try { opts.root.SetActive(!culled); } catch (e) { console.warn(opts.title + ": could not switch the game on/off", e); }
+            if (!culled) build();
+        }
+        function checkDistance() {
+            const head = headTracker();
+            const p = head.markerPos || head.posePos;
+            const c = opts.centre;
+            if (!p || !c) return; // position not known yet (it arrives once the player moves)
+            const d = Math.hypot(p.x - c.x, p.y - c.y, p.z - c.z);
+            // Off past cullDistance, on again a metre inside it, so it doesn't flicker at the edge.
+            const off = P.culled ? d > config.cullDistance - 1 : d > config.cullDistance;
+            if (off !== P.culled) setCulled(off);
+        }
+
+        // --- Start ---
+        if (config.cullDistance > 0) setInterval(checkDistance, 1000);
+        setInterval(update, 10000); // so idle and departed players show up
+        scene.On("user-joined", () => update());
+        // Frees the seats of a player who leaves. Only one player still here (the lowest uid) writes it.
+        scene.On("user-left", e => {
+            const u = e && e.detail;
+            const left = u && (u.uid ?? (u.user && u.user.uid));
+            const m = me();
+            if (!left || !m || m.uid === String(left)) return;
+            const held = opts.sides.filter(s => P.seats[s.id] && String(P.seats[s.id].uid) === String(left));
+            if (held.length === 0) return update();
+            const others = Object.keys(scene.users || {}).map(String).filter(x => x !== String(left));
+            if (!others.includes(m.uid)) others.push(m.uid);
+            if (others.sort()[0] !== m.uid) return update();
+            const seats = { ...P.seats };
+            for (const s of held) seats[s.id] = null;
+            writeSeats(seats);
+        });
+
+        const api = { build, stamp, load, mayMove, notice, update, clickSeat, clickReset };
+        // For debugging from the browser console: window.__gamePanels[key].debug()
+        (window.__gamePanels = window.__gamePanels || {})[opts.key] = {
+            ...api,
+            debug: () => ({ culled: P.culled, seats: P.seats, lastActionTime: P.lastActionTime, turn: opts.turn(),
+                ui: P.ui && { status: P.ui.status.text, notice: P.ui.notice.text, seats: Object.fromEntries(Object.entries(P.ui.seatBtns).map(([k, b]) => [k, b.text])) } })
+        };
+        return api;
     }
 
     // --- Main Initializer ---
@@ -1178,9 +1377,6 @@
         config.boardPosition = new BS.Vector3(...config.boardPosition);
         config.boardRotation = new BS.Vector3(...config.boardRotation);
         config.boardScale = new BS.Vector3(...config.boardScale);
-        config.resetPosition = new BS.Vector3(...config.resetPosition);
-        config.resetRotation = new BS.Vector3(...config.resetRotation);
-        config.resetScale = new BS.Vector3(...config.resetScale);
 
         await setupScene();
     };
