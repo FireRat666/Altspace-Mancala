@@ -1072,9 +1072,10 @@
     // `lockTimeout` seconds. Unclaimed sides can be moved by anyone. While a game is under way only
     // its seated players (or the space host) can reset it, unless a seat is empty or idle.
     //
-    // Switching off: beyond `cullDistance` metres the game's root object is switched off and the
-    // panel removed (a BanterUI panel loses its contents when switched off, so it is built again on
-    // the way back). Moves made meanwhile still arrive and show when the player returns.
+    // Switching off: beyond `cullDistance` metres the game's root object is shrunk to nothing, and it
+    // grows back on return. The panel isn't removed and built again (the app doesn't free everything
+    // a deleted UI panel used, so that leaked memory each time), nor switched off (a BanterUI panel
+    // loses its contents when switched off). Moves made meanwhile still arrive.
     //
     // opts: {
     //   title, key (space state key), root (GameObject), centre (world Vector3),
@@ -1307,23 +1308,17 @@
                 update();
             })().catch(e => console.warn(opts.title + ": could not build the panel", e)).finally(() => {
                 P.building = null;
-                if (P.culled) destroyUI(); // went out of range while it was being built
             });
             return P.building;
-        }
-        function destroyUI() {
-            if (!P.ui) return;
-            const obj = P.ui.obj;
-            P.ui = null;
-            try { obj.Destroy(); } catch (e) { }
         }
 
         // --- Switching off when far away ---
         function setCulled(culled) {
             P.culled = culled;
-            if (culled) destroyUI();
-            try { opts.root.SetActive(!culled); } catch (e) { console.warn(opts.title + ": could not switch the game on/off", e); }
-            if (!culled) build();
+            try {
+                opts.root.GetComponent(BS.ComponentType.Transform).localScale = culled ? new BS.Vector3(0, 0, 0) : config.boardScale;
+            } catch (e) { console.warn(opts.title + ": could not switch the game on/off", e); }
+            if (!culled) update();
         }
         function checkDistance() {
             const head = headTracker();
